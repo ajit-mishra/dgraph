@@ -499,7 +499,8 @@ func printKeys(db *badger.DB) {
 
 	fmt.Printf("prefix = %s\n", hex.Dump(prefix))
 	var loop int
-	for itr.Seek(prefix); itr.ValidForPrefix(prefix); itr.Next() {
+	itr.Seek(prefix)
+	for itr.ValidForPrefix(prefix) {
 		item := itr.Item()
 		pk, err := x.Parse(item.Key())
 		x.Check(err)
@@ -523,15 +524,6 @@ func printKeys(db *badger.DB) {
 			x.Check2(buf.WriteString("{r}"))
 		}
 
-		switch {
-		case item.DiscardEarlierVersions():
-			x.Check2(buf.WriteString(" {v.las}"))
-		case item.IsDeletedOrExpired():
-			x.Check2(buf.WriteString(" {v.not}"))
-		default:
-			x.Check2(buf.WriteString(" {v.ok}"))
-		}
-
 		x.Check2(buf.WriteString(" attr: " + pk.Attr))
 		if len(pk.Term) > 0 {
 			fmt.Fprintf(&buf, " term: [%d] %s ", pk.Term[0], pk.Term[1:])
@@ -542,10 +534,35 @@ func printKeys(db *badger.DB) {
 		if pk.StartUid > 0 {
 			fmt.Fprintf(&buf, " startUid: %d ", pk.StartUid)
 		}
-		fmt.Fprintf(&buf, " key: %s", hex.EncodeToString(item.Key()))
+		// Iterate over the same key, collecting deltas
+		key := item.Key()
+		fmt.Fprintf(&buf, " key: %s", hex.EncodeToString(key))
+		var sz, deltaCount int64
+		for ; itr.Valid(); itr.Next() {
+			item := itr.Item()
+			meta := item.UserMeta()
+			// For the schema
+			isCompleted := meta&(posting.BitCompletePosting|posting.BitEmptyPosting) > 0
+			if !bytes.Equal(item.Key(), key) || isCompleted {
+				break
+			}
+			if meta&posting.BitDeltaPosting > 0 {
+				deltaCount++
+				sz += item.EstimatedSize()
+			}
+			// We should not read anything after the DiscardEarlier versions and
+			// IsDeletedOrExpired(), right?
+			// switch {
+			// case item.DiscardEarlierVersions():
+			// 	x.Check2(buf.WriteString(" {v.las}"))
+			// case item.IsDeletedOrExpired():
+			// 	x.Check2(buf.WriteString(" {v.not}"))
+			// default:
+			// 	x.Check2(buf.WriteString(" {v.ok}"))
+			// }
+		}
 		if opt.itemMeta {
-			fmt.Fprintf(&buf, " item: [%d, b%04b]", item.EstimatedSize(), item.UserMeta())
-			fmt.Fprintf(&buf, " ts: %d", item.Version())
+			fmt.Fprintf(&buf, " size: [%d, #%d]", sz, deltaCount)
 		}
 		fmt.Println(buf.String())
 		loop++
